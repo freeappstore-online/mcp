@@ -1,0 +1,12 @@
+name = "freeappstore-mcp"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+API_BASE = "https://api.freeappstore.online"
+GITHUB_ORG = "freeappstore-online"
+
+routes = [
+  { pattern = "mcp.freeappstore.online/*", zone_name = "freeappstore.online" }
+]
