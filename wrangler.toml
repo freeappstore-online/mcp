@@ -7,6 +7,6 @@ compatibility_flags = ["nodejs_compat"]
 API_BASE = "https://api.freeappstore.online"
 GITHUB_ORG = "freeappstore-online"
 
-routes = [
-  { pattern = "mcp.freeappstore.online/*", zone_name = "freeappstore.online" }
-]
+[[routes]]
+pattern = "mcp.freeappstore.online/*"
+zone_name = "freeappstore.online"
