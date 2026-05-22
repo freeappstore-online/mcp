@@ -1,10 +1,12 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { verifySession } from "./session.js";
 
 interface Env {
   API_BASE: string;
   GITHUB_ORG: string;
+  SESSION_SIGNING_KEY?: string;
 }
 
 // GitHub Actions API (public repos, no auth needed)
@@ -42,19 +44,28 @@ async function fasApi(apiBase: string, path: string, token?: string) {
   return await res.json();
 }
 
-export class FasMcpAgent extends McpAgent<Env> {
+export interface McpProps extends Record<string, unknown> {
+  userId?: string;
+  token?: string;
+}
+
+export class FasMcpAgent extends McpAgent<Env, unknown, McpProps> {
   server = new McpServer({
     name: "FreeAppStore",
-    version: "0.1.0",
+    version: "0.2.0",
   });
 
   async init() {
     // ── list_apps ──────────────────────────────────────────────
     this.server.tool(
       "list_apps",
-      "List your published apps on FreeAppStore. Requires a FAS session token.",
-      { token: z.string().describe("FAS session token from `fas login`") },
-      async ({ token }) => {
+      "List your published apps on FreeAppStore. Requires authentication (connect with a FAS session token).",
+      {},
+      async () => {
+        const token = this.props.token;
+        if (!token) {
+          return { content: [{ type: "text" as const, text: "Not authenticated. Connect with a FAS session token to use this tool." }] };
+        }
         const data = (await fasApi(this.env.API_BASE, "/v1/apps/mine", token)) as {
           apps?: Array<{ id: string; store: string; category: string; oneliner: string; appUrl: string; repoUrl: string }>;
           error?: string;
@@ -229,15 +240,45 @@ import { FasShell, Avatar, SignInButton, ThemeToggle, ProfileMenu, ProfilePage }
   }
 }
 
+// ── Auth middleware ─────────────────────────────────────────────
+// Extract Bearer token from Authorization header, verify it, and
+// pass user info into the DO via URL params (which McpAgent reads as props).
+async function authenticateRequest(
+  request: Request,
+  env: Env,
+): Promise<{ userId?: string; token?: string }> {
+  const auth = request.headers.get("Authorization") ?? "";
+  if (!auth.startsWith("Bearer ") || !env.SESSION_SIGNING_KEY) return {};
+  const token = auth.slice(7).trim();
+  if (!token) return {};
+  const payload = await verifySession(token, env.SESSION_SIGNING_KEY);
+  if (!payload) return {};
+  return { userId: payload.uid, token };
+}
+
 export default {
-  fetch(request: Request, env: Env, ctx: ExecutionContext) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
 
     if (url.pathname === "/" || url.pathname === "") {
       return new Response(
-        "FreeAppStore MCP Server\n\nConnect: npx mcp-remote https://mcp.freeappstore.online/mcp\n\nTools: list_apps, deploy_status, app_info, platform_guide, sdk_reference\n",
+        "FreeAppStore MCP Server\n\nConnect: npx mcp-remote https://mcp.freeappstore.online/mcp\n\nTools: list_apps, deploy_status, app_info, platform_guide, sdk_reference\n\nAuth: pass Authorization: Bearer <FAS session token> for authenticated tools.\n",
         { headers: { "content-type": "text/plain" } }
       );
+    }
+
+    // Authenticate and pass user context into the MCP DO via props.
+    if (url.pathname.startsWith("/mcp")) {
+      const auth = await authenticateRequest(request, env);
+      // Pass auth context as query params — McpAgent.serve reads these as props.
+      if (auth.userId) {
+        url.searchParams.set("userId", auth.userId);
+      }
+      if (auth.token) {
+        url.searchParams.set("token", auth.token);
+      }
+      const modifiedRequest = new Request(url.toString(), request);
+      return FasMcpAgent.serve("/mcp").fetch(modifiedRequest, env, ctx);
     }
 
     return FasMcpAgent.serve("/mcp").fetch(request, env, ctx);
