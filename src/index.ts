@@ -146,7 +146,7 @@ export class FasMcpAgent extends McpAgent<Env, unknown, McpProps> {
     this.server.tool(
       "sdk_reference",
       "Quick reference for @freeappstore/sdk — imports, features, and usage patterns for auth, KV, counters, collections, rooms, proxy, hooks, and UI components.",
-      { feature: z.enum(["all", "auth", "kv", "counters", "collections", "rooms", "proxy", "hooks", "ui"]).optional().describe("Specific feature to look up, or 'all' for the full reference") },
+      { feature: z.enum(["all", "auth", "kv", "counters", "collections", "rooms", "proxy", "keys", "hooks", "ui"]).optional().describe("Specific feature to look up, or 'all' for the full reference") },
       async ({ feature }) => {
         const sections: Record<string, string> = {
           auth: `## Auth
@@ -200,13 +200,23 @@ room.leave()
 Limits: 5 rooms x 25 peers x 50 user-hours/day per app.`,
           proxy: `## Secret-injecting API Proxy
 \`\`\`tsx
-const result = await fas.proxy.call('openai', {
-  path: '/v1/chat/completions',
-  method: 'POST',
-  body: { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Hello' }] }
-})
+const weather = await fas.proxy.fetch('api.openweathermap.org/data/2.5/weather?q=London')
+const data = await weather.json()
 \`\`\`
-Calls third-party APIs without exposing keys. Keys configured by platform admin.`,
+Calls third-party APIs without exposing keys. Developer keys configured by platform admin, user keys stored in the key vault.`,
+          keys: `## User API Key Vault
+\`\`\`tsx
+// Check if user has a key
+const hasKey = await fas.keys.has('openai')
+
+// Redirect to platform key management page
+fas.keys.manage('openai')
+
+// Check all configured providers
+const keys = await fas.keys.status()
+// [{ provider: 'openai', label: '...', createdAt: ..., lastUsedAt: ... }]
+\`\`\`
+Users store their API keys on the platform (encrypted AES-256-GCM). Apps never see plaintext keys. Use \`<KeyPrompt>\` component to prompt users when a key is missing. Supported providers: OpenAI, Anthropic, Google AI, OpenRouter, Replicate, Stability AI, ElevenLabs, Stripe.`,
           hooks: `## React Hooks
 \`\`\`tsx
 import { useAuth, useTheme } from '@freeappstore/sdk/hooks'
@@ -216,17 +226,28 @@ const { theme, preference, setPreference } = useTheme()
 \`\`\``,
           ui: `## UI Components
 \`\`\`tsx
-import { FasShell, Avatar, SignInButton, ThemeToggle, ProfileMenu, ProfilePage } from '@freeappstore/sdk/ui'
+import {
+  FasShell, Avatar, SignInButton, ThemeToggle, ProfileMenu, ProfilePage,
+  Spinner, Badge, Card, Tabs, Modal, ConfirmDialog, EmptyState,
+  ProgressBar, SearchInput, ListRow, ErrorBoundary, KeyPrompt,
+} from '@freeappstore/sdk/ui'
 
-// Full app wrapper with topbar, auth, footer:
+// Full app wrapper:
 <FasShell app={fas} appName="My App" requireAuth>{children}</FasShell>
 
-// Individual components:
-<Avatar user={user} size={32} />
-<SignInButton app={fas} label="Get started" />
-<ThemeToggle />
-<ProfileMenu app={fas} />
-<ProfilePage app={fas} />
+// Building blocks:
+<Spinner size={24} />
+<Badge variant="success">Live</Badge>
+<Card onClick={handleClick}>content</Card>
+<Tabs tabs={[{key:'a',label:'Tab A'},{key:'b',label:'Tab B'}]} active="a" onChange={setTab} />
+<Modal open={isOpen} onClose={close} title="Settings">content</Modal>
+<ConfirmDialog open={show} onConfirm={ok} onCancel={cancel} title="Delete?" message="Are you sure?" variant="danger" />
+<EmptyState message="No items yet" action={<button>Add one</button>} />
+<ProgressBar value={75} label="Upload" />
+<SearchInput value={query} onChange={setQuery} />
+<ListRow title="Item" subtitle="description" onClick={handleClick} />
+<ErrorBoundary fallback={<p>Oops</p>}>{children}</ErrorBoundary>
+<KeyPrompt app={fas} provider="openai" providerName="OpenAI" />
 \`\`\``,
         };
 
