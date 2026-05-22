@@ -10,3 +10,12 @@ GITHUB_ORG = "freeappstore-online"
 [[routes]]
 pattern = "mcp.freeappstore.online/*"
 zone_name = "freeappstore.online"
+
+[durable_objects]
+bindings = [
+  { name = "MCP_OBJECT", class_name = "FasMcpAgent" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FasMcpAgent"]

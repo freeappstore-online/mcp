@@ -42,7 +42,7 @@ async function fasApi(apiBase: string, path: string, token?: string) {
   return await res.json();
 }
 
-export class FreeAppStoreMCP extends McpAgent<Env> {
+export class FasMcpAgent extends McpAgent<Env> {
   server = new McpServer({
     name: "FreeAppStore",
     version: "0.1.0",
@@ -240,6 +240,6 @@ export default {
       );
     }
 
-    return FreeAppStoreMCP.serve("/mcp").fetch(request, env, ctx);
+    return FasMcpAgent.serve("/mcp").fetch(request, env, ctx);
   },
 };
