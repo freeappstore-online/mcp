@@ -186,7 +186,7 @@ export class FasMcpAgent extends McpAgent<Env, unknown, McpProps> {
     this.server.tool(
       "sdk_reference",
       "Quick reference for @freeappstore/sdk — imports, features, and usage patterns for auth, KV, counters, collections, rooms, proxy, hooks, and UI components.",
-      { feature: z.enum(["all", "auth", "kv", "counters", "collections", "rooms", "proxy", "keys", "hooks", "ui"]).optional().describe("Specific feature to look up, or 'all' for the full reference") },
+      { feature: z.enum(["all", "auth", "kv", "counters", "collections", "rooms", "proxy", "keys", "hooks", "ui", "free-apis"]).optional().describe("Specific feature to look up, or 'all' for the full reference") },
       async ({ feature }) => {
         const sections: Record<string, string> = {
           auth: `## Auth
@@ -289,6 +289,30 @@ import {
 <ErrorBoundary fallback={<p>Oops</p>}>{children}</ErrorBoundary>
 <KeyPrompt app={fas} provider="openai" providerName="OpenAI" />
 \`\`\``,
+          "free-apis": `## Free Libraries & APIs (no key needed)
+
+**Client-side libraries** (install and use directly):
+- **Maps:** Leaflet + OpenStreetMap (\`pnpm add leaflet react-leaflet\`)
+- **Charts:** Recharts (\`pnpm add recharts\`)
+- **Rich text:** Tiptap (\`pnpm add @tiptap/react @tiptap/starter-kit\`)
+- **Date/time:** date-fns (\`pnpm add date-fns\`)
+- **Markdown:** react-markdown (\`pnpm add react-markdown\`)
+- **PDF:** react-pdf or jsPDF (\`pnpm add @react-pdf/renderer\`)
+- **QR codes:** qrcode.react (\`pnpm add qrcode.react\`)
+- **Drag & drop:** dnd-kit (\`pnpm add @dnd-kit/core @dnd-kit/sortable\`)
+- **Animations:** Framer Motion (\`pnpm add framer-motion\`)
+- **Icons:** Lucide React (\`pnpm add lucide-react\`) — 1500+ icons
+- **Forms:** React Hook Form (\`pnpm add react-hook-form\`)
+- **State:** Zustand (\`pnpm add zustand\`)
+
+**Free APIs** (no key, call directly from browser):
+- Weather: Open-Meteo, Geocoding: Nominatim, Routing: OSRM
+- Exchange rates: ExchangeRate-API, Countries: REST Countries
+- Dictionary: dictionaryapi.dev, Hacker News: hn.algolia.com
+- Wikipedia: MediaWiki API, Open Library: openlibrary.org
+- Random users: randomuser.me, Images: picsum.photos
+
+Prefer these before using the proxy. No key = no cost = no setup.`,
         };
 
         const selected = feature === "all" || !feature
