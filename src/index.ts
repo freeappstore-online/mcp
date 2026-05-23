@@ -129,6 +129,46 @@ export class FasMcpAgent extends McpAgent<Env, unknown, McpProps> {
       }
     );
 
+    // ── app_logs ──────────────────────────────────────────────
+    this.server.tool(
+      "app_logs",
+      "Query recent logs for an app — errors, warnings, SDK calls, build info. Requires authentication (app owner).",
+      {
+        app_id: z.string().describe("App ID"),
+        level: z.enum(["debug", "info", "warn", "error"]).optional().describe("Filter by log level"),
+        limit: z.number().optional().describe("Max entries to return (default 50, max 500)"),
+      },
+      async ({ app_id, level, limit }) => {
+        const token = this.props.token;
+        if (!token) {
+          return { content: [{ type: "text" as const, text: "Not authenticated. Connect with a FAS session token to query logs." }] };
+        }
+        const params = new URLSearchParams();
+        if (level) params.set("level", level);
+        params.set("limit", String(limit ?? 50));
+        const data = (await fasApi(this.env.API_BASE, `/v1/apps/${app_id}/logs?${params}`, token)) as {
+          logs?: Array<{ ts: number; level: string; category: string; message: string; data?: unknown; userId: string; build?: Record<string, unknown> }>;
+          error?: string;
+        };
+        if (data.error) return { content: [{ type: "text" as const, text: `Error: ${data.error}` }] };
+        const logs = data.logs ?? [];
+        if (logs.length === 0) return { content: [{ type: "text" as const, text: `No logs found for ${app_id}.` }] };
+        const lines = logs.map(l => {
+          const time = new Date(l.ts).toISOString().slice(11, 23);
+          const data = l.data ? ` ${JSON.stringify(l.data)}` : "";
+          return `${time} [${l.level.toUpperCase().padEnd(5)}] ${l.category}: ${l.message}${data}`;
+        });
+        // Include build info if present
+        const buildEntry = logs.find(l => l.build);
+        let buildInfo = "";
+        if (buildEntry?.build) {
+          const b = buildEntry.build;
+          buildInfo = `\n\n**Build:** ${b.appVersion ?? "?"} (${(b.commitSha as string)?.slice(0, 7) ?? "?"}) built ${b.buildDate ?? "?"} | SDK ${b.sdkVersion ?? "?"} | ${b.viewport ?? "?"}`;
+        }
+        return { content: [{ type: "text" as const, text: `Logs for **${app_id}** (${logs.length} entries):${buildInfo}\n\n\`\`\`\n${lines.join("\n")}\n\`\`\`` }] };
+      }
+    );
+
     // ── platform_guide ─────────────────────────────────────────
     this.server.tool(
       "platform_guide",
