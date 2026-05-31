@@ -14,7 +14,7 @@ Remote MCP server for AI agents to interact with the FreeAppStore platform.
 | `deploy_status` | None | Check GitHub Actions deploy status |
 | `app_info` | None | Get app URLs, repo, status |
 | `platform_guide` | None | Fetch SKILLS.md (full platform guide) |
-| `sdk_reference` | None | Quick SDK reference (auth, kv, counters, rooms, ui) |
+| `sdk_reference` | None | SDK reference (auth, kv, counters, collections, rooms, proxy, keys, email, webhooks, roles, ui) |
 
 ## Connect from Claude Code
 
