@@ -6,6 +6,7 @@ import { fetchTemplateFiles, listRepoFiles, pushFiles, readRepoFile, type RepoFi
 interface Env {
   API_BASE: string;
   GITHUB_ORG: string;
+  MCP_OBJECT: DurableObjectNamespace;
   /** Org token with contents:write on the store org — powers the write tools
    *  (scaffold push + update_files). Writes are gated by verified ownership. */
   GITHUB_TOKEN?: string;
@@ -79,6 +80,19 @@ export class FasMcpAgent extends McpAgent<Env, unknown, McpProps> {
     name: "FreeAppStore",
     version: "0.2.0",
   });
+
+  /** Called (via DO RPC) by the worker's fetch handler before each tool-call
+   *  request is dispatched. agents@0.0.74's Streamable HTTP serve() doesn't
+   *  propagate ctx.props, so we inject the authenticated session here — in
+   *  memory (for this live instance) and storage (survives a restart). */
+  async setAuth(props: McpProps): Promise<void> {
+    this.props = props;
+    try {
+      await (this as unknown as { ctx: { storage: { put(k: string, v: unknown): Promise<void> } } }).ctx.storage.put("props", props);
+    } catch {
+      /* in-memory set is enough for the immediately-following tool call */
+    }
+  }
 
   async init() {
     // ── list_apps ──────────────────────────────────────────────
@@ -481,18 +495,24 @@ export default {
       );
     }
 
-    // Authenticate and pass user context into the MCP DO via props.
+    // Authenticate and inject the session into the target MCP DO before
+    // dispatch. Streamable HTTP serve() in agents@0.0.74 drops ctx.props, so we
+    // write props straight into the DO (keyed the same way serve() keys it:
+    // `streamable-http:${mcp-session-id}`). The session id is present on every
+    // post-initialize request (i.e. all tool calls).
     if (url.pathname.startsWith("/mcp")) {
       const auth = authenticateRequest(request);
-      // Pass auth context as query params — McpAgent.serve reads these as props.
-      if (auth.userId) {
-        url.searchParams.set("userId", auth.userId);
+      const sessionId = request.headers.get("mcp-session-id");
+      if (auth.token && sessionId) {
+        try {
+          const id = env.MCP_OBJECT.idFromName(`streamable-http:${sessionId}`);
+          const stub = env.MCP_OBJECT.get(id) as unknown as { setAuth(p: McpProps): Promise<void> };
+          await stub.setAuth({ userId: auth.userId, token: auth.token });
+        } catch {
+          /* best effort — tool will report "not authenticated" if this failed */
+        }
       }
-      if (auth.token) {
-        url.searchParams.set("token", auth.token);
-      }
-      const modifiedRequest = new Request(url.toString(), request);
-      return FasMcpAgent.serve("/mcp").fetch(modifiedRequest, env, ctx);
+      return FasMcpAgent.serve("/mcp").fetch(request, env, ctx);
     }
 
     return FasMcpAgent.serve("/mcp").fetch(request, env, ctx);
