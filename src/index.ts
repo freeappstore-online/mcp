@@ -71,6 +71,16 @@ async function ownsApp(apiBase: string, token: string, appId: string): Promise<b
 
 const txt = (text: string) => ({ content: [{ type: "text" as const, text }] });
 
+// Scope VibeCode agent sessions to the caller. The agent worker keys its
+// Durable Object by the raw session id, with no per-user namespacing — so
+// without this a passed/guessed session_id could reach another user's build
+// session (its files + conversation). We force every session under the
+// caller's identity, so a user can only ever create/read their own.
+function sessionPrefix(userId?: string): string {
+  const u = (userId ?? "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 24) || "anon";
+  return `mcp-${u}-`;
+}
+
 export interface McpProps extends Record<string, unknown> {
   userId?: string;
   token?: string;
@@ -446,7 +456,16 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
           openrouter: "anthropic/claude-sonnet-4",
           google: "gemini-2.0-flash",
         };
-        const sid = session_id ?? `mcp-${crypto.randomUUID().slice(0, 12)}`;
+        // Force the session under the caller's namespace (see sessionPrefix):
+        // a passed session_id is only honored if it's already in the caller's
+        // namespace, otherwise it's re-scoped — so you can't target another
+        // user's session id.
+        const prefix = sessionPrefix(this.props.userId);
+        const sid = session_id
+          ? session_id.startsWith(prefix)
+            ? session_id
+            : prefix + session_id.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40)
+          : prefix + crypto.randomUUID().slice(0, 12);
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), 110_000); // cap; build continues server-side
         let phases: string[] = [];
@@ -507,6 +526,9 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
       async ({ session_id }) => {
         const token = this.props.token;
         if (!token) return txt("Not authenticated. Connect with a FAS session token.");
+        // Only let callers read sessions in their own namespace.
+        if (!session_id.startsWith(sessionPrefix(this.props.userId)))
+          return txt("That session isn't one of yours — agent sessions are scoped to your account. Use the session_id returned by agent_build.");
         const res = await fetch(`${this.env.AGENT_BASE}/session/${session_id}/status`, {
           headers: { Authorization: `Bearer ${token}` },
         });
