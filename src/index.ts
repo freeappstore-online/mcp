@@ -2,15 +2,17 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { fetchTemplateFiles, listRepoFiles, pushFiles, readRepoFile, type RepoFile, textToB64 } from "./github.js";
+import { verifySession } from "./session.js";
+import { handleOAuthRoute, resolveOAuthToken } from "./oauth-provider.js";
 
 interface Env {
   API_BASE: string;
   GITHUB_ORG: string;
   AGENT_BASE: string;
   MCP_OBJECT: DurableObjectNamespace;
-  /** Org token with contents:write on the store org — powers the write tools
-   *  (scaffold push + update_files). Writes are gated by verified ownership. */
   GITHUB_TOKEN?: string;
+  SESSION_SIGNING_KEY?: string;
+  OAUTH_KV?: KVNamespace;
 }
 
 // GitHub Actions API (public repos, no auth needed)
@@ -592,17 +594,35 @@ function decodeUid(token: string): string | undefined {
   }
 }
 
-function authenticateRequest(request: Request): { userId?: string; token?: string } {
+async function authenticateRequest(request: Request, env: Env): Promise<{ userId?: string; token?: string }> {
   const auth = request.headers.get("Authorization") ?? "";
   if (!auth.startsWith("Bearer ")) return {};
-  const token = auth.slice(7).trim();
+  let token = auth.slice(7).trim();
   if (!token) return {};
+
+  // Resolve OAuth access token → underlying FAS session
+  if (env.OAUTH_KV) {
+    const fasSession = await resolveOAuthToken(token, env.OAUTH_KV);
+    if (fasSession) token = fasSession;
+  }
+
   return { userId: decodeUid(token), token };
 }
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
+
+    // OAuth 2.1 routes (discovery, registration, authorize, token)
+    if (env.OAUTH_KV && env.SESSION_SIGNING_KEY) {
+      const oauthRes = await handleOAuthRoute(request, {
+        issuer: `${url.protocol}//${url.host}`,
+        fasAuthStart: `${env.API_BASE}/v1/auth/github/start`,
+        kv: env.OAUTH_KV,
+        sessionSigningKey: env.SESSION_SIGNING_KEY,
+      });
+      if (oauthRes) return oauthRes;
+    }
 
     if (url.pathname === "/" || url.pathname === "") {
       return new Response(
@@ -613,7 +633,7 @@ export default {
           "Two ways to build, both from your editor:\n" +
           "  1. create_app → read_file/update_files to improve → deploy_status.\n" +
           "  2. agent_build('make a X app and deploy it') → the VibeCode agent writes + ships it (uses your vaulted AI key) → agent_status.\n\n" +
-          "Auth: pass Authorization: Bearer <FAS session token> for authenticated tools.\n",
+          "Auth: OAuth 2.1 (automatic via mcp-remote) or Bearer <FAS session token>.\n",
         { headers: { "content-type": "text/plain" } }
       );
     }
@@ -624,7 +644,7 @@ export default {
     // `streamable-http:${mcp-session-id}`). The session id is present on every
     // post-initialize request (i.e. all tool calls).
     if (url.pathname.startsWith("/mcp")) {
-      const auth = authenticateRequest(request);
+      const auth = await authenticateRequest(request, env);
       const sessionId = request.headers.get("mcp-session-id");
       if (auth.token && sessionId) {
         try {
