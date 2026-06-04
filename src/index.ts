@@ -2,12 +2,10 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { fetchTemplateFiles, listRepoFiles, pushFiles, readRepoFile, type RepoFile, textToB64 } from "./github.js";
-import { verifySession } from "./session.js";
 
 interface Env {
   API_BASE: string;
   GITHUB_ORG: string;
-  SESSION_SIGNING_KEY?: string;
   /** Org token with contents:write on the store org — powers the write tools
    *  (scaffold push + update_files). Writes are gated by verified ownership. */
   GITHUB_TOKEN?: string;
@@ -444,19 +442,28 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
 }
 
 // ── Auth middleware ─────────────────────────────────────────────
-// Extract Bearer token from Authorization header, verify it, and
-// pass user info into the DO via URL params (which McpAgent reads as props).
-async function authenticateRequest(
-  request: Request,
-  env: Env,
-): Promise<{ userId?: string; token?: string }> {
+// Pass the Bearer session token into the DO as a prop. We do NOT locally
+// HMAC-verify it: the FAS backend is the source of truth — every authenticated
+// tool calls it (provision, /v1/apps/mine, logs), and it rejects invalid or
+// expired tokens. The MCP doesn't hold the backend's session signing key (it's
+// never been exported), so local verification can't work anyway. We decode the
+// uid from the token payload best-effort, purely for context/logging.
+function decodeUid(token: string): string | undefined {
+  try {
+    const b64 = token.split(".")[0].replace(/-/g, "+").replace(/_/g, "/");
+    const json = JSON.parse(atob(b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), "=")));
+    return typeof json.uid === "string" ? json.uid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function authenticateRequest(request: Request): { userId?: string; token?: string } {
   const auth = request.headers.get("Authorization") ?? "";
-  if (!auth.startsWith("Bearer ") || !env.SESSION_SIGNING_KEY) return {};
+  if (!auth.startsWith("Bearer ")) return {};
   const token = auth.slice(7).trim();
   if (!token) return {};
-  const payload = await verifySession(token, env.SESSION_SIGNING_KEY);
-  if (!payload) return {};
-  return { userId: payload.uid, token };
+  return { userId: decodeUid(token), token };
 }
 
 export default {
@@ -476,7 +483,7 @@ export default {
 
     // Authenticate and pass user context into the MCP DO via props.
     if (url.pathname.startsWith("/mcp")) {
-      const auth = await authenticateRequest(request, env);
+      const auth = authenticateRequest(request);
       // Pass auth context as query params — McpAgent.serve reads these as props.
       if (auth.userId) {
         url.searchParams.set("userId", auth.userId);
