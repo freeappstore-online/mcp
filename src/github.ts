@@ -63,7 +63,7 @@ export async function fetchTemplateFiles(
 
   const files = new Map<string, RepoFile>();
   for (const item of tree.tree) {
-    if (item.type !== "blob" || item.path.startsWith(".git")) continue;
+    if (item.type !== "blob" || item.path.startsWith(".git/")) continue;
     const blob = await gh(token, `${base}/git/blobs/${item.sha}`);
     if (typeof blob?.content !== "string") throw new Error(`blob ${item.path} fetch failed`);
     if (TEXT_RE.test(item.path)) {
@@ -138,7 +138,7 @@ export async function listRepoFiles(org: string, repo: string, token?: string): 
   if (!headSha) return [];
   const tree = await gh(token, `${base}/git/trees/${headSha}?recursive=1`);
   if (!Array.isArray(tree?.tree)) return [];
-  return tree.tree.filter((i: any) => i.type === "blob" && !i.path.startsWith(".git")).map((i: any) => i.path);
+  return tree.tree.filter((i: any) => i.type === "blob" && !i.path.startsWith(".git/")).map((i: any) => i.path);
 }
 
 /** Read one file's text content from a repo. */
