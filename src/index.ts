@@ -6,6 +6,7 @@ import { fetchTemplateFiles, listRepoFiles, pushFiles, readRepoFile, type RepoFi
 interface Env {
   API_BASE: string;
   GITHUB_ORG: string;
+  AGENT_BASE: string;
   MCP_OBJECT: DurableObjectNamespace;
   /** Org token with contents:write on the store org — powers the write tools
    *  (scaffold push + update_files). Writes are gated by verified ownership. */
@@ -422,6 +423,95 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
         const content = await readRepoFile(this.env.GITHUB_ORG, app_id, this.env.GITHUB_TOKEN, path);
         if (content === null) return txt(`Could not read ${path} from ${app_id} (not found?).`);
         return txt(`\`\`\`\n${content}\n\`\`\``);
+      },
+    );
+
+    // ── agent_build (delegate code-gen to the platform's VibeCode agent) ──
+    this.server.tool(
+      "agent_build",
+      "Hand a natural-language prompt to the FreeAppStore VibeCode AGENT — the platform's own AI writes the code AND deploys it. This is different from create_app/update_files (where the CALLING model writes the code): here you just prompt, and the platform builds. Uses your stored AI key (provider must be in your vault). Long-running; it builds in the background. Returns the session_id — poll agent_status to watch it and get the live URL. Tip: include the app id in your prompt, e.g. 'Build a dice roller and deploy it as dice-roller'.",
+      {
+        prompt: z.string().describe("What to build, in plain English. Include a desired app id."),
+        model: z.string().optional().describe("Model id (default claude-sonnet-4-6)"),
+        session_id: z.string().optional().describe("Continue an existing build session"),
+      },
+      async ({ prompt, model, session_id }) => {
+        const token = this.props.token;
+        if (!token) return txt("Not authenticated. Connect with a FAS session token.");
+        const sid = session_id ?? `mcp-${crypto.randomUUID().slice(0, 12)}`;
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 110_000); // cap; build continues server-side
+        let phases: string[] = [];
+        let appId: string | null = null;
+        let timedOut = false;
+        try {
+          const res = await fetch(`${this.env.AGENT_BASE}/session/${sid}/chat`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ message: prompt, aiConfig: { provider: "anthropic", model: model ?? "claude-sonnet-4-6" } }),
+            signal: ctrl.signal,
+          });
+          if (!res.ok || !res.body) {
+            clearTimeout(timer);
+            return txt(`Agent chat failed (${res.status}): ${(await res.text()).slice(0, 300)}`);
+          }
+          const reader = res.body.getReader();
+          const dec = new TextDecoder();
+          let buf = "";
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            const parts = buf.split("\n\n");
+            buf = parts.pop() ?? "";
+            for (const p of parts) {
+              const line = p.split("\n").find((l) => l.startsWith("data: "));
+              if (!line) continue;
+              try {
+                const ev = JSON.parse(line.slice(6));
+                if (ev.type === "deploy" && ev.data) {
+                  try { const d = JSON.parse(ev.data); if (d.phase) phases.push(d.phase); if (d.appId) appId = d.appId; } catch { /* */ }
+                }
+                if (ev.appId) appId = ev.appId;
+              } catch { /* */ }
+            }
+          }
+        } catch {
+          timedOut = true; // aborted at the cap — the agent keeps building server-side
+        }
+        clearTimeout(timer);
+        const last = phases[phases.length - 1];
+        const liveLine = appId ? `Live (when built): https://${appId}.freeappstore.online` : "";
+        return txt(
+          `${timedOut ? "⏳ Agent still building" : "✓ Agent turn finished"} (session \`${sid}\`).\n` +
+          (appId ? `App: **${appId}**\n` : "") +
+          (last ? `Last deploy phase: ${last}\n` : "") +
+          `${liveLine}\n\nPoll \`agent_status\` with session_id="${sid}" for progress + the live URL.`,
+        );
+      },
+    );
+
+    // ── agent_status ───────────────────────────────────────────
+    this.server.tool(
+      "agent_status",
+      "Check a VibeCode agent build session (started with agent_build): the app id it's building, deploy phase, and live URL once ready.",
+      { session_id: z.string().describe("The session_id returned by agent_build") },
+      async ({ session_id }) => {
+        const token = this.props.token;
+        if (!token) return txt("Not authenticated. Connect with a FAS session token.");
+        const res = await fetch(`${this.env.AGENT_BASE}/session/${session_id}/status`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return txt(`Status fetch failed (${res.status}).`);
+        const s = (await res.json()) as { appId?: string | null; appUrl?: string | null; deployStatus?: { phase?: string; error?: string } | null; messageCount?: number };
+        const lines = [
+          `Session **${session_id}**`,
+          `App: ${s.appId ?? "(not deployed yet)"}`,
+          `Deploy phase: ${s.deployStatus?.phase ?? "—"}${s.deployStatus?.error ? ` (error: ${s.deployStatus.error.slice(0, 200)})` : ""}`,
+          s.appUrl ? `Live: ${s.appUrl}` : s.appId ? `URL (once live): https://${s.appId}.freeappstore.online` : "",
+          `Messages: ${s.messageCount ?? 0}`,
+        ].filter(Boolean);
+        return txt(lines.join("\n"));
       },
     );
 
