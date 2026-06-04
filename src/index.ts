@@ -432,12 +432,20 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
       "Hand a natural-language prompt to the FreeAppStore VibeCode AGENT — the platform's own AI writes the code AND deploys it. This is different from create_app/update_files (where the CALLING model writes the code): here you just prompt, and the platform builds. Uses your stored AI key (provider must be in your vault). Long-running; it builds in the background. Returns the session_id — poll agent_status to watch it and get the live URL. Tip: include the app id in your prompt, e.g. 'Build a dice roller and deploy it as dice-roller'.",
       {
         prompt: z.string().describe("What to build, in plain English. Include a desired app id."),
-        model: z.string().optional().describe("Model id (default claude-sonnet-4-6)"),
+        provider: z.enum(["anthropic", "openai", "openrouter", "google"]).optional().describe("Which vaulted AI key to use (default anthropic). Must be a provider you have a key for."),
+        model: z.string().optional().describe("Model id (defaults per provider, e.g. claude-sonnet-4-6)"),
         session_id: z.string().optional().describe("Continue an existing build session"),
       },
-      async ({ prompt, model, session_id }) => {
+      async ({ prompt, provider, model, session_id }) => {
         const token = this.props.token;
         if (!token) return txt("Not authenticated. Connect with a FAS session token.");
+        const prov = provider ?? "anthropic";
+        const defaultModel: Record<string, string> = {
+          anthropic: "claude-sonnet-4-6",
+          openai: "gpt-4o",
+          openrouter: "anthropic/claude-sonnet-4",
+          google: "gemini-2.0-flash",
+        };
         const sid = session_id ?? `mcp-${crypto.randomUUID().slice(0, 12)}`;
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), 110_000); // cap; build continues server-side
@@ -448,7 +456,7 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
           const res = await fetch(`${this.env.AGENT_BASE}/session/${sid}/chat`, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ message: prompt, aiConfig: { provider: "anthropic", model: model ?? "claude-sonnet-4-6" } }),
+            body: JSON.stringify({ message: prompt, aiConfig: { provider: prov, model: model ?? defaultModel[prov] ?? "claude-sonnet-4-6" } }),
             signal: ctrl.signal,
           });
           if (!res.ok || !res.body) {
@@ -577,9 +585,12 @@ export default {
     if (url.pathname === "/" || url.pathname === "") {
       return new Response(
         "FreeAppStore MCP Server\n\nConnect: npx mcp-remote https://mcp.freeappstore.online/mcp\n\n" +
-          "Build tools (auth): create_app, update_files, read_file, list_files\n" +
-          "Info tools: list_apps, deploy_status, app_info, app_logs, platform_guide, sdk_reference\n\n" +
-          "Drive the full loop from your editor: create_app → read_file/update_files to improve → deploy_status to watch it go live at <id>.freeappstore.online.\n\n" +
+          "Build it yourself (your model writes the code): create_app, update_files, read_file, list_files\n" +
+          "Let the platform agent build it (you just prompt): agent_build, agent_status\n" +
+          "Info: list_apps, deploy_status, app_info, app_logs, platform_guide, sdk_reference\n\n" +
+          "Two ways to build, both from your editor:\n" +
+          "  1. create_app → read_file/update_files to improve → deploy_status.\n" +
+          "  2. agent_build('make a X app and deploy it') → the VibeCode agent writes + ships it (uses your vaulted AI key) → agent_status.\n\n" +
           "Auth: pass Authorization: Bearer <FAS session token> for authenticated tools.\n",
         { headers: { "content-type": "text/plain" } }
       );

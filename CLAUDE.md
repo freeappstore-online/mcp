@@ -8,7 +8,7 @@ Remote MCP server for AI agents to interact with the FreeAppStore platform.
 
 ## Tools
 
-**Build the full app loop from your editor (auth + ownership):**
+**Build it yourself — the CALLING model writes the code, MCP ships it (auth + ownership):**
 
 | Tool | Auth | Description |
 |------|------|-------------|
@@ -16,6 +16,16 @@ Remote MCP server for AI agents to interact with the FreeAppStore platform.
 | `update_files` | owner | Write/overwrite files in your app's repo → auto-deploys in ~30-60s. The improve loop. |
 | `read_file` | None | Read a file from an app's repo |
 | `list_files` | None | List files in an app's repo |
+
+**Or let the platform's VibeCode AGENT write the code — you just prompt:**
+
+| Tool | Auth | Description |
+|------|------|-------------|
+| `agent_build` | FAS token | Hand a natural-language prompt to the VibeCode agent (`agent.freeappstore.online`); it writes the code AND deploys, using your **vaulted AI key** (provider must be in your vault, e.g. anthropic). Long-running; returns a `session_id`. |
+| `agent_status` | FAS token | Poll an `agent_build` session — app id, deploy phase, live URL. |
+
+Note: `create_app`/`update_files` need no AI key (the client model is the author);
+`agent_build` needs a funded key in your FreeAppStore vault for the chosen provider.
 
 **Info / inspect:**
 
