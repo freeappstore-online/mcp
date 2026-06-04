@@ -1,12 +1,16 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { fetchTemplateFiles, listRepoFiles, pushFiles, readRepoFile, type RepoFile, textToB64 } from "./github.js";
 import { verifySession } from "./session.js";
 
 interface Env {
   API_BASE: string;
   GITHUB_ORG: string;
   SESSION_SIGNING_KEY?: string;
+  /** Org token with contents:write on the store org — powers the write tools
+   *  (scaffold push + update_files). Writes are gated by verified ownership. */
+  GITHUB_TOKEN?: string;
 }
 
 // GitHub Actions API (public repos, no auth needed)
@@ -43,6 +47,29 @@ async function fasApi(apiBase: string, path: string, token?: string) {
   if (!res.ok) return { error: `API ${res.status}: ${await res.text()}` };
   return await res.json();
 }
+
+// POST to the FAS backend (e.g. /v1/publish — the same path `fas publish` uses).
+async function fasPost(apiBase: string, path: string, token: string, body: unknown) {
+  const res = await fetch(`${apiBase}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  let json: any = {};
+  try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
+  if (!res.ok) return { error: json.error ?? `API ${res.status}`, detail: json.detail ?? json.body ?? text, status: res.status };
+  return json;
+}
+
+// Ownership gate for write tools: does the session user own this published app?
+async function ownsApp(apiBase: string, token: string, appId: string): Promise<boolean> {
+  const data = (await fasApi(apiBase, "/v1/apps/mine", token)) as { apps?: Array<{ id: string }>; error?: string };
+  if (data.error) return false;
+  return (data.apps ?? []).some((a) => a.id === appId);
+}
+
+const txt = (text: string) => ({ content: [{ type: "text" as const, text }] });
 
 export interface McpProps extends Record<string, unknown> {
   userId?: string;
@@ -322,6 +349,97 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
         return { content: [{ type: "text" as const, text: `# @freeappstore/sdk Reference\n\n${selected}` }] };
       }
     );
+
+    // ── create_app (provision + scaffold + go live) ────────────
+    this.server.tool(
+      "create_app",
+      "Create AND publish a brand-new app on FreeAppStore, end to end. Provisions the GitHub repo + R2 hosting + store listing (same as `fas publish`), scaffolds the chosen template, and pushes it so the app deploys live at <app_id>.freeappstore.online (~1-2 min). Then use read_file/update_files to build it out. Requires authentication.",
+      {
+        app_id: z.string().describe("App slug: lowercase letters/numbers/hyphens, no 'free'/'pro' prefix. Becomes <app_id>.freeappstore.online"),
+        category: z.string().describe("utilities, productivity, learning, lifestyle, finance, health, creative, or social"),
+        oneliner: z.string().describe("One-line description shown in the store"),
+        type: z.enum(["standalone", "connected"]).optional().describe("standalone (no backend, default) or connected (uses the SDK: auth/kv/rooms/etc.)"),
+        description: z.string().optional().describe("Longer description (defaults to the oneliner)"),
+      },
+      async ({ app_id, category, oneliner, type, description }) => {
+        const token = this.props.token;
+        if (!token) return txt("Not authenticated. Connect with a FAS session token to create apps.");
+        if (!this.env.GITHUB_TOKEN) return txt("Write tools are disabled (server missing GITHUB_TOKEN).");
+        const kind = type ?? "standalone";
+        // 1. Provision via the same backend endpoint `fas publish` uses.
+        const prov = (await fasPost(this.env.API_BASE, "/v1/publish", token, {
+          name: app_id, store: "apps", category, type: kind, oneliner, description: description || oneliner,
+        })) as { error?: string; detail?: string; appUrl?: string; repoUrl?: string };
+        if (prov.error) return txt(`Provision failed: ${prov.error}${prov.detail ? ` — ${typeof prov.detail === "string" ? prov.detail : JSON.stringify(prov.detail)}` : ""}`);
+        // 2. Scaffold: fetch the template, substitute, push → triggers deploy.
+        try {
+          const templateRepo = kind === "connected" ? "template-connected" : "template-standalone";
+          const files = await fetchTemplateFiles(this.env.GITHUB_ORG, templateRepo, this.env.GITHUB_TOKEN, app_id);
+          await pushFiles(this.env.GITHUB_ORG, app_id, this.env.GITHUB_TOKEN, files, `Initial ${app_id} — scaffolded via MCP`);
+          return txt(
+            `✅ Created **${app_id}** (${kind}).\n` +
+            `Live in ~1-2 min: https://${app_id}.freeappstore.online\n` +
+            `Repo: https://github.com/${this.env.GITHUB_ORG}/${app_id}\n` +
+            `Listing: https://freeappstore.online/apps/${app_id}\n\n` +
+            `Scaffolded ${files.size} files. Next: \`list_files\`/\`read_file\` to inspect, \`update_files\` to build it out, \`deploy_status\` to watch it deploy.`,
+          );
+        } catch (e) {
+          return txt(`Provisioned the repo + hosting, but the scaffold push failed: ${String(e)}\nThe app exists — retry by pushing files with update_files.`);
+        }
+      },
+    );
+
+    // ── list_files ─────────────────────────────────────────────
+    this.server.tool(
+      "list_files",
+      "List the files in an app's repo (so you know what to read/edit).",
+      { app_id: z.string().describe("App ID") },
+      async ({ app_id }) => {
+        const files = await listRepoFiles(this.env.GITHUB_ORG, app_id, this.env.GITHUB_TOKEN);
+        if (files.length === 0) return txt(`No files found for ${app_id} (repo empty or not found).`);
+        return txt(`**${app_id}** — ${files.length} files:\n\n${files.map((f) => `- ${f}`).join("\n")}`);
+      },
+    );
+
+    // ── read_file ──────────────────────────────────────────────
+    this.server.tool(
+      "read_file",
+      "Read one file's contents from an app's repo (e.g. web/src/App.tsx).",
+      { app_id: z.string().describe("App ID"), path: z.string().describe("File path relative to repo root, e.g. web/src/App.tsx") },
+      async ({ app_id, path }) => {
+        const content = await readRepoFile(this.env.GITHUB_ORG, app_id, this.env.GITHUB_TOKEN, path);
+        if (content === null) return txt(`Could not read ${path} from ${app_id} (not found?).`);
+        return txt(`\`\`\`\n${content}\n\`\`\``);
+      },
+    );
+
+    // ── update_files (improve loop) ────────────────────────────
+    this.server.tool(
+      "update_files",
+      "Improve an app you own: write/overwrite one or more files in its repo with full new contents. The push auto-deploys to <app_id>.freeappstore.online in ~30-60s. Requires authentication + ownership.",
+      {
+        app_id: z.string().describe("App ID (must be one you published)"),
+        files: z.array(z.object({ path: z.string(), content: z.string() })).describe("Files to write — each with the FULL new content. Paths relative to repo root, e.g. web/src/App.tsx"),
+        message: z.string().optional().describe("Commit message"),
+      },
+      async ({ app_id, files, message }) => {
+        const token = this.props.token;
+        if (!token) return txt("Not authenticated. Connect with a FAS session token.");
+        if (!this.env.GITHUB_TOKEN) return txt("Write tools are disabled (server missing GITHUB_TOKEN).");
+        if (!files?.length) return txt("No files provided.");
+        if (!(await ownsApp(this.env.API_BASE, token, app_id)))
+          return txt(`You don't own "${app_id}" (or it isn't published). Only the owner can update it.`);
+        const map = new Map<string, RepoFile>(
+          files.map((f) => [f.path, { content: textToB64(f.content), encoding: "base64" as const }]),
+        );
+        try {
+          const sha = await pushFiles(this.env.GITHUB_ORG, app_id, this.env.GITHUB_TOKEN, map, message || `Update ${app_id} via MCP`);
+          return txt(`✅ Pushed ${files.length} file(s) to **${app_id}** (${sha.slice(0, 7)}). Auto-deploying to https://${app_id}.freeappstore.online (~30-60s). Use deploy_status to watch.`);
+        } catch (e) {
+          return txt(`Push failed: ${String(e)}`);
+        }
+      },
+    );
   }
 }
 
@@ -347,7 +465,11 @@ export default {
 
     if (url.pathname === "/" || url.pathname === "") {
       return new Response(
-        "FreeAppStore MCP Server\n\nConnect: npx mcp-remote https://mcp.freeappstore.online/mcp\n\nTools: list_apps, deploy_status, app_info, platform_guide, sdk_reference\n\nAuth: pass Authorization: Bearer <FAS session token> for authenticated tools.\n",
+        "FreeAppStore MCP Server\n\nConnect: npx mcp-remote https://mcp.freeappstore.online/mcp\n\n" +
+          "Build tools (auth): create_app, update_files, read_file, list_files\n" +
+          "Info tools: list_apps, deploy_status, app_info, app_logs, platform_guide, sdk_reference\n\n" +
+          "Drive the full loop from your editor: create_app → read_file/update_files to improve → deploy_status to watch it go live at <id>.freeappstore.online.\n\n" +
+          "Auth: pass Authorization: Bearer <FAS session token> for authenticated tools.\n",
         { headers: { "content-type": "text/plain" } }
       );
     }
