@@ -95,7 +95,6 @@ function auditLog(tool: string, userId: string | undefined, extra?: Record<strin
   console.log(JSON.stringify({ audit: "mcp", tool, userId: userId ?? "anon", ts: Date.now(), ...extra }));
 }
 
-const WRITE_TOOLS = new Set(["create_app", "update_files", "agent_build"]);
 
 export class FasMcpAgent extends McpAgent<Env, unknown, McpProps> {
   server = new McpServer({
