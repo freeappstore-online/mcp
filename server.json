@@ -1,12 +1,12 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.freeappstore-online/mcp",
-  "description": "AI agent tools for FreeAppStore: deploy status, SDK docs, app info, platform guide.",
+  "description": "AI agent tools for FreeAppStore: create, build, deploy, and inspect PWA apps. Two build modes: write code yourself (create_app + update_files) or prompt the VibeCode agent (agent_build).",
   "repository": {
     "url": "https://github.com/freeappstore-online/mcp",
     "source": "github"
   },
-  "version": "0.1.0",
+  "version": "0.2.0",
   "remotes": [
     {
       "type": "streamable-http",
@@ -15,24 +15,52 @@
   ],
   "tools": [
     {
-      "name": "deploy_status",
-      "description": "Check GitHub Actions deploy status for any app (last 5 runs)"
+      "name": "create_app",
+      "description": "Create + publish a new app: provision repo/hosting/listing, scaffold a template, deploy live at <id>.freeappstore.online"
+    },
+    {
+      "name": "update_files",
+      "description": "Write/overwrite files in an app you own; auto-redeploys in ~30-60s"
+    },
+    {
+      "name": "read_file",
+      "description": "Read a file from an app's repo"
+    },
+    {
+      "name": "list_files",
+      "description": "List files in an app's repo"
+    },
+    {
+      "name": "agent_build",
+      "description": "Hand a prompt to the VibeCode agent; it writes the code and deploys it (uses your vaulted AI key)"
+    },
+    {
+      "name": "agent_status",
+      "description": "Poll an agent_build session for app id, deploy phase, live URL"
+    },
+    {
+      "name": "list_apps",
+      "description": "List your published apps (requires auth)"
     },
     {
       "name": "app_info",
-      "description": "Get live URL, repo, store listing, and up/down status for any app"
+      "description": "Get an app's live URL, repo, store listing, status"
     },
     {
-      "name": "sdk_reference",
-      "description": "Quick SDK reference for auth, KV, counters, collections, rooms, proxy, hooks, UI"
+      "name": "deploy_status",
+      "description": "Check recent GitHub Actions deploy runs for an app"
+    },
+    {
+      "name": "app_logs",
+      "description": "Recent errors/warnings/SDK calls/build info for an app you own"
     },
     {
       "name": "platform_guide",
       "description": "Fetch the full SKILLS.md platform guide"
     },
     {
-      "name": "list_apps",
-      "description": "List your published apps (requires FAS session token)"
+      "name": "sdk_reference",
+      "description": "Quick @freeappstore/sdk reference (auth, kv, counters, collections, rooms, proxy, keys, ui)"
     }
   ]
 }

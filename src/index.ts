@@ -86,7 +86,16 @@ function sessionPrefix(userId?: string): string {
 export interface McpProps extends Record<string, unknown> {
   userId?: string;
   token?: string;
+  readOnly?: boolean;
 }
+
+// ── Audit log ───────────────────────────────────────────────────
+// Structured console.log picked up by CF Worker tail / Logpush.
+function auditLog(tool: string, userId: string | undefined, extra?: Record<string, unknown>) {
+  console.log(JSON.stringify({ audit: "mcp", tool, userId: userId ?? "anon", ts: Date.now(), ...extra }));
+}
+
+const WRITE_TOOLS = new Set(["create_app", "update_files", "agent_build"]);
 
 export class FasMcpAgent extends McpAgent<Env, unknown, McpProps> {
   server = new McpServer({
@@ -378,19 +387,31 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
     // ── create_app (provision + scaffold + go live) ────────────
     this.server.tool(
       "create_app",
-      "Create AND publish a brand-new app on FreeAppStore, end to end. Provisions the GitHub repo + R2 hosting + store listing (same as `fas publish`), scaffolds the chosen template, and pushes it so the app deploys live at <app_id>.freeappstore.online (~1-2 min). Then use read_file/update_files to build it out. Requires authentication.",
+      "Create AND publish a brand-new app on FreeAppStore, end to end. Provisions the GitHub repo + R2 hosting + store listing (same as `fas publish`), scaffolds the chosen template, and pushes it so the app deploys live at <app_id>.freeappstore.online (~1-2 min). Then use read_file/update_files to build it out. Requires authentication. Set dry_run=true to validate without creating.",
       {
         app_id: z.string().describe("App slug: lowercase letters/numbers/hyphens, no 'free'/'pro' prefix. Becomes <app_id>.freeappstore.online"),
         category: z.string().describe("utilities, productivity, learning, lifestyle, finance, health, creative, or social"),
         oneliner: z.string().describe("One-line description shown in the store"),
         type: z.enum(["standalone", "connected"]).optional().describe("standalone (no backend, default) or connected (uses the SDK: auth/kv/rooms/etc.)"),
         description: z.string().optional().describe("Longer description (defaults to the oneliner)"),
+        dry_run: z.boolean().optional().describe("If true, validate inputs and return what would happen without actually creating the app"),
       },
-      async ({ app_id, category, oneliner, type, description }) => {
+      async ({ app_id, category, oneliner, type, description, dry_run }) => {
+        if (this.props.readOnly) return txt("Read-only mode is active. Write tools are disabled.");
         const token = this.props.token;
         if (!token) return txt("Not authenticated. Connect with a FAS session token to create apps.");
         if (!this.env.GITHUB_TOKEN) return txt("Write tools are disabled (server missing GITHUB_TOKEN).");
         const kind = type ?? "standalone";
+        auditLog("create_app", this.props.userId, { app_id, category, kind, dry_run: !!dry_run });
+        if (dry_run) {
+          return txt(
+            `[DRY RUN] Would create **${app_id}** (${kind}):\n` +
+            `- Provision: GitHub repo \`${this.env.GITHUB_ORG}/${app_id}\` + R2 hosting + store listing\n` +
+            `- Scaffold: \`template-${kind}\` with APPNAME→${app_id} substitution\n` +
+            `- Deploy: push to main → GitHub Actions → live at https://${app_id}.freeappstore.online\n` +
+            `- Category: ${category}\n- Oneliner: ${oneliner}\n\nNo changes made. Remove dry_run to execute.`,
+          );
+        }
         // 1. Provision via the same backend endpoint `fas publish` uses.
         const prov = (await fasPost(this.env.API_BASE, "/v1/publish", token, {
           name: app_id, store: "apps", category, type: kind, oneliner, description: description || oneliner,
@@ -402,7 +423,7 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
           const files = await fetchTemplateFiles(this.env.GITHUB_ORG, templateRepo, this.env.GITHUB_TOKEN, app_id);
           await pushFiles(this.env.GITHUB_ORG, app_id, this.env.GITHUB_TOKEN, files, `Initial ${app_id} — scaffolded via MCP`);
           return txt(
-            `✅ Created **${app_id}** (${kind}).\n` +
+            `Created **${app_id}** (${kind}).\n` +
             `Live in ~1-2 min: https://${app_id}.freeappstore.online\n` +
             `Repo: https://github.com/${this.env.GITHUB_ORG}/${app_id}\n` +
             `Listing: https://freeappstore.online/apps/${app_id}\n\n` +
@@ -449,8 +470,10 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
         session_id: z.string().optional().describe("Continue an existing build session"),
       },
       async ({ prompt, provider, model, session_id }) => {
+        if (this.props.readOnly) return txt("Read-only mode is active. Write tools are disabled.");
         const token = this.props.token;
         if (!token) return txt("Not authenticated. Connect with a FAS session token.");
+        auditLog("agent_build", this.props.userId, { provider: provider ?? "anthropic" });
         const prov = provider ?? "anthropic";
         const defaultModel: Record<string, string> = {
           anthropic: "claude-sonnet-4-6",
@@ -550,25 +573,36 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
     // ── update_files (improve loop) ────────────────────────────
     this.server.tool(
       "update_files",
-      "Improve an app you own: write/overwrite one or more files in its repo with full new contents. The push auto-deploys to <app_id>.freeappstore.online in ~30-60s. Requires authentication + ownership.",
+      "Improve an app you own: write/overwrite one or more files in its repo with full new contents. The push auto-deploys to <app_id>.freeappstore.online in ~30-60s. Requires authentication + ownership. Set dry_run=true to validate without pushing.",
       {
         app_id: z.string().describe("App ID (must be one you published)"),
         files: z.array(z.object({ path: z.string(), content: z.string() })).describe("Files to write — each with the FULL new content. Paths relative to repo root, e.g. web/src/App.tsx"),
         message: z.string().optional().describe("Commit message"),
+        dry_run: z.boolean().optional().describe("If true, validate ownership and list files that would be written without pushing"),
       },
-      async ({ app_id, files, message }) => {
+      async ({ app_id, files, message, dry_run }) => {
+        if (this.props.readOnly) return txt("Read-only mode is active. Write tools are disabled.");
         const token = this.props.token;
         if (!token) return txt("Not authenticated. Connect with a FAS session token.");
         if (!this.env.GITHUB_TOKEN) return txt("Write tools are disabled (server missing GITHUB_TOKEN).");
         if (!files?.length) return txt("No files provided.");
         if (!(await ownsApp(this.env.API_BASE, token, app_id)))
           return txt(`You don't own "${app_id}" (or it isn't published). Only the owner can update it.`);
+        auditLog("update_files", this.props.userId, { app_id, fileCount: files.length, dry_run: !!dry_run });
+        if (dry_run) {
+          const listing = files.map((f) => `- ${f.path} (${f.content.length} chars)`).join("\n");
+          return txt(
+            `[DRY RUN] Would push ${files.length} file(s) to **${app_id}**:\n${listing}\n\n` +
+            `Commit: ${message || `Update ${app_id} via MCP`}\n` +
+            `Ownership: verified. No changes made. Remove dry_run to execute.`,
+          );
+        }
         const map = new Map<string, RepoFile>(
           files.map((f) => [f.path, { content: textToB64(f.content), encoding: "base64" as const }]),
         );
         try {
           const sha = await pushFiles(this.env.GITHUB_ORG, app_id, this.env.GITHUB_TOKEN, map, message || `Update ${app_id} via MCP`);
-          return txt(`✅ Pushed ${files.length} file(s) to **${app_id}** (${sha.slice(0, 7)}). Auto-deploying to https://${app_id}.freeappstore.online (~30-60s). Use deploy_status to watch.`);
+          return txt(`Pushed ${files.length} file(s) to **${app_id}** (${sha.slice(0, 7)}). Auto-deploying to https://${app_id}.freeappstore.online (~30-60s). Use deploy_status to watch.`);
         } catch (e) {
           return txt(`Push failed: ${String(e)}`);
         }
@@ -594,11 +628,15 @@ function decodeUid(token: string): string | undefined {
   }
 }
 
-async function authenticateRequest(request: Request, env: Env): Promise<{ userId?: string; token?: string }> {
+async function authenticateRequest(request: Request, env: Env): Promise<McpProps> {
+  const url = new URL(request.url);
+  const readOnly = request.headers.get("X-FAS-Read-Only") === "true"
+    || url.searchParams.get("read_only") === "1";
+
   const auth = request.headers.get("Authorization") ?? "";
-  if (!auth.startsWith("Bearer ")) return {};
+  if (!auth.startsWith("Bearer ")) return { readOnly };
   let token = auth.slice(7).trim();
-  if (!token) return {};
+  if (!token) return { readOnly };
 
   // Resolve OAuth access token → underlying FAS session
   if (env.OAUTH_KV) {
@@ -606,7 +644,7 @@ async function authenticateRequest(request: Request, env: Env): Promise<{ userId
     if (fasSession) token = fasSession;
   }
 
-  return { userId: decodeUid(token), token };
+  return { userId: decodeUid(token), token, readOnly };
 }
 
 export default {
