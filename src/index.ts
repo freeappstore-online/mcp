@@ -390,7 +390,7 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
       "Create AND publish a brand-new app on FreeAppStore, end to end. Provisions the GitHub repo + R2 hosting + store listing (same as `fas publish`), scaffolds the chosen template, and pushes it so the app deploys live at <app_id>.freeappstore.online (~1-2 min). Then use read_file/update_files to build it out. Requires authentication. Set dry_run=true to validate without creating.",
       {
         app_id: z.string().describe("App slug: lowercase letters/numbers/hyphens, no 'free'/'pro' prefix. Becomes <app_id>.freeappstore.online"),
-        category: z.string().describe("utilities, productivity, learning, lifestyle, finance, health, creative, or social"),
+        category: z.string().describe("Learning, Strategy, Discovery, Brain Training, Social, Productivity, Health & Fitness, Finance, News & Weather, Utilities, or Other"),
         oneliner: z.string().describe("One-line description shown in the store"),
         type: z.enum(["standalone", "connected"]).optional().describe("standalone (no backend, default) or connected (uses the SDK: auth/kv/rooms/etc.)"),
         description: z.string().optional().describe("Longer description (defaults to the oneliner)"),
