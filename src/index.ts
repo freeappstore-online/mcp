@@ -687,7 +687,7 @@ export default {
         try {
           const id = env.MCP_OBJECT.idFromName(`streamable-http:${sessionId}`);
           const stub = env.MCP_OBJECT.get(id) as unknown as { setAuth(p: McpProps): Promise<void> };
-          await stub.setAuth({ userId: auth.userId, token: auth.token });
+          await stub.setAuth({ userId: auth.userId, token: auth.token, readOnly: auth.readOnly });
         } catch {
           /* best effort — tool will report "not authenticated" if this failed */
         }
