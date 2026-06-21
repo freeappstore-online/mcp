@@ -4,6 +4,7 @@ import { z } from "zod";
 import { fetchTemplateFiles, listRepoFiles, pushFiles, readRepoFile, type RepoFile, textToB64 } from "./github.js";
 import { verifySession } from "./session.js";
 import { handleOAuthRoute, resolveOAuthToken } from "./oauth-provider.js";
+import { sessionPrefix, auditLog, decodeUid } from "./lib.js";
 
 interface Env {
   API_BASE: string;
@@ -73,15 +74,7 @@ async function ownsApp(apiBase: string, token: string, appId: string): Promise<b
 
 const txt = (text: string) => ({ content: [{ type: "text" as const, text }] });
 
-// Scope VibeCode agent sessions to the caller. The agent worker keys its
-// Durable Object by the raw session id, with no per-user namespacing — so
-// without this a passed/guessed session_id could reach another user's build
-// session (its files + conversation). We force every session under the
-// caller's identity, so a user can only ever create/read their own.
-function sessionPrefix(userId?: string): string {
-  const u = (userId ?? "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 24) || "anon";
-  return `mcp-${u}-`;
-}
+// sessionPrefix, auditLog, decodeUid are in lib.ts for testability.
 
 export interface McpProps extends Record<string, unknown> {
   userId?: string;
@@ -89,11 +82,6 @@ export interface McpProps extends Record<string, unknown> {
   readOnly?: boolean;
 }
 
-// ── Audit log ───────────────────────────────────────────────────
-// Structured console.log picked up by CF Worker tail / Logpush.
-function auditLog(tool: string, userId: string | undefined, extra?: Record<string, unknown>) {
-  console.log(JSON.stringify({ audit: "mcp", tool, userId: userId ?? "anon", ts: Date.now(), ...extra }));
-}
 
 
 export class FasMcpAgent extends McpAgent<Env, unknown, McpProps> {
@@ -617,15 +605,7 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
 // expired tokens. The MCP doesn't hold the backend's session signing key (it's
 // never been exported), so local verification can't work anyway. We decode the
 // uid from the token payload best-effort, purely for context/logging.
-function decodeUid(token: string): string | undefined {
-  try {
-    const b64 = token.split(".")[0].replace(/-/g, "+").replace(/_/g, "/");
-    const json = JSON.parse(atob(b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), "=")));
-    return typeof json.uid === "string" ? json.uid : undefined;
-  } catch {
-    return undefined;
-  }
-}
+// decodeUid is in lib.ts
 
 async function authenticateRequest(request: Request, env: Env): Promise<McpProps> {
   const url = new URL(request.url);
