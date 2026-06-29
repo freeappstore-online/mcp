@@ -60,9 +60,14 @@ app.get("/callback", async (c) => {
   if (!payload) return c.text("invalid session", 400);
 
   const scopes = parseScopes(oauthReqInfo.scope);
+  // The provider's tokens/codes are `userId:grantId:secret`, so the userId must
+  // not contain a colon. FAS uids are `gh:123` / `google:<sub>` — pass a
+  // colon-free id to the library and keep the real uid in props (used for
+  // scoping + audit).
+  const libUserId = payload.uid.replace(/:/g, "_");
   const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
     request: oauthReqInfo,
-    userId: payload.uid,
+    userId: libUserId,
     scope: scopes,
     metadata: { label: payload.uid },
     props: { userId: payload.uid, token: fasSession, scopes },
