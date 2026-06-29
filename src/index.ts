@@ -582,6 +582,45 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
       },
     );
 
+    // ── agent_activity (read your conversation with the build agent) ──
+    this.server.tool(
+      "agent_activity",
+      "Read your VibeCode conversation with the build agent for a session: your prompts, the agent's replies, and its tool actions (file writes, compliance checks, deploys). Scoped to sessions you own — the backend rejects others. Get a session_id from agent_build, or from the Console URL /create/<id>.",
+      {
+        session_id: z.string().describe("Session id — from agent_build, or the Console /create/<id> URL"),
+        limit: z.number().int().min(1).max(200).optional().describe("Max recent messages to return (default 30)"),
+      },
+      async ({ session_id, limit }) => {
+        const token = this.props.token;
+        if (!token) return txt("Not authenticated. Connect with a FAS session token.");
+        const res = await fetch(`${this.env.AGENT_BASE}/session/${encodeURIComponent(session_id)}/history`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.status === 403) return txt("That session isn't yours — agent sessions are scoped to your account.");
+        if (res.status === 404 || res.status === 400) return txt(`No session "${session_id}" found.`);
+        if (!res.ok) return txt(`History fetch failed (${res.status}).`);
+        const data = (await res.json()) as {
+          messages?: Array<{ role: string; content: string; toolCalls?: Array<{ name: string; input?: { path?: string; id?: string } }> }>;
+          appId?: string | null;
+          appName?: string | null;
+        };
+        const msgs = data.messages ?? [];
+        if (msgs.length === 0) return txt(`Session **${session_id}**${data.appId ? ` (${data.appId})` : ""}: no messages yet.`);
+        const recent = msgs.slice(-(limit ?? 30));
+        const rendered = recent
+          .map((m) => {
+            if (m.toolCalls?.length) {
+              const calls = m.toolCalls.map((tc) => `${tc.name}(${tc.input?.path ?? tc.input?.id ?? ""})`).join(", ");
+              return `[agent → tools] ${calls}`;
+            }
+            if (m.role === "tool") return `[tool result] ${m.content.slice(0, 200)}`;
+            return `**${m.role}:** ${m.content.slice(0, 1200)}`;
+          })
+          .join("\n\n");
+        return txt(`Session **${session_id}**${data.appName ? ` — ${data.appName}` : ""} (${msgs.length} messages, showing ${recent.length}):\n\n${rendered}`);
+      },
+    );
+
     // ── update_files (improve loop) ────────────────────────────
     this.server.tool(
       "update_files",
