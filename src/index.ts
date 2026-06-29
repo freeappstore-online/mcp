@@ -1,10 +1,11 @@
+import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { fetchTemplateFiles, listRepoFiles, pushFiles, readRepoFile, type RepoFile, textToB64 } from "./github.js";
-import { verifySession } from "./session.js";
-import { createAuthChallenge, handleOAuthRoute, resolveOAuthToken } from "./oauth-provider.js";
-import { sessionPrefix, auditLog, decodeUid } from "./lib.js";
+import { AuthHandler } from "./auth-handler.js";
+import { sessionPrefix, auditLog } from "./lib.js";
+import { audit, listAuditEvents, MCP_SCOPES, requirePermission, type SafetyContext } from "./safety.js";
 
 interface Env {
   API_BASE: string;
@@ -14,6 +15,8 @@ interface Env {
   GITHUB_TOKEN?: string;
   SESSION_SIGNING_KEY?: string;
   OAUTH_KV?: KVNamespace;
+  /** When "1", all non-read tools are disabled server-wide. */
+  MCP_READ_ONLY?: string;
 }
 
 // GitHub Actions API (public repos, no auth needed)
@@ -80,6 +83,8 @@ export interface McpProps extends Record<string, unknown> {
   userId?: string;
   token?: string;
   readOnly?: boolean;
+  /** MCP scopes granted by the OAuth token (null/undefined → all scopes). */
+  scopes?: string[] | null;
 }
 
 
@@ -90,20 +95,34 @@ export class FasMcpAgent extends McpAgent<Env, unknown, McpProps> {
     version: "0.2.0",
   });
 
-  /** Called (via DO RPC) by the worker's fetch handler before each tool-call
-   *  request is dispatched. agents@0.0.74's Streamable HTTP serve() doesn't
-   *  propagate ctx.props, so we inject the authenticated session here — in
-   *  memory (for this live instance) and storage (survives a restart). */
-  async setAuth(props: McpProps): Promise<void> {
-    this.props = props;
-    try {
-      await (this as unknown as { ctx: { storage: { put(k: string, v: unknown): Promise<void> } } }).ctx.storage.put("props", props);
-    } catch {
-      /* in-memory set is enough for the immediately-following tool call */
-    }
+  // The OAuth provider only routes authenticated requests to this handler, so
+  // props (set in completeAuthorization) are always present for tool calls.
+  declare props: McpProps;
+
+  /** Safety context for the current authenticated user — scope/permission
+   *  gating + user-scoped KV audit. See safety.ts. */
+  safety(): SafetyContext {
+    return {
+      env: this.env,
+      subject: this.props.userId,
+      scopes: this.props.scopes ?? null,
+      readOnly: this.props.readOnly,
+    };
   }
 
   async init() {
+    // ── mcp_audit_log ──────────────────────────────────────────
+    this.server.tool(
+      "mcp_audit_log",
+      "Read your recent MCP audit events for this account — every write/dry-run/denied tool action, newest first. User-scoped.",
+      { limit: z.number().int().min(1).max(200).optional().describe("Max events to return (default 50)") },
+      async ({ limit }) => {
+        const denied = await requirePermission(this.safety(), "read", "mcp_audit_log", { limit });
+        if (denied) return denied;
+        return txt(JSON.stringify(await listAuditEvents(this.safety(), limit ?? 50), null, 2));
+      },
+    );
+
     // ── list_apps ──────────────────────────────────────────────
     this.server.tool(
       "list_apps",
@@ -387,10 +406,13 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
         if (this.props.readOnly) return txt("Read-only mode is active. Write tools are disabled.");
         const token = this.props.token;
         if (!token) return txt("Not authenticated. Connect with a FAS session token to create apps.");
+        const denied = await requirePermission(this.safety(), "write", "create_app", { app_id, category, type });
+        if (denied) return denied;
         if (!this.env.GITHUB_TOKEN) return txt("Write tools are disabled (server missing GITHUB_TOKEN).");
         const kind = type ?? "standalone";
         auditLog("create_app", this.props.userId, { app_id, category, kind, dry_run: !!dry_run });
         if (dry_run) {
+          await audit(this.safety(), { tool: "create_app", action: "dry_run", input: { app_id, category, kind } });
           return txt(
             `[DRY RUN] Would create **${app_id}** (${kind}):\n` +
             `- Provision: GitHub repo \`${this.env.GITHUB_ORG}/${app_id}\` + R2 hosting + store listing\n` +
@@ -409,6 +431,7 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
           const templateRepo = kind === "connected" ? "template-connected" : "template-standalone";
           const files = await fetchTemplateFiles(this.env.GITHUB_ORG, templateRepo, this.env.GITHUB_TOKEN, app_id);
           await pushFiles(this.env.GITHUB_ORG, app_id, this.env.GITHUB_TOKEN, files, `Initial ${app_id} — scaffolded via MCP`);
+          await audit(this.safety(), { tool: "create_app", action: "success", input: { app_id, category, kind }, result: { url: `https://${app_id}.freeappstore.online` } });
           return txt(
             `Created **${app_id}** (${kind}).\n` +
             `Live in ~1-2 min: https://${app_id}.freeappstore.online\n` +
@@ -457,10 +480,12 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
         session_id: z.string().optional().describe("Continue an existing build session"),
       },
       async ({ prompt, provider, model, session_id }) => {
-        if (this.props.readOnly) return txt("Read-only mode is active. Write tools are disabled.");
         const token = this.props.token;
         if (!token) return txt("Not authenticated. Connect with a FAS session token.");
+        const denied = await requirePermission(this.safety(), "runtime", "agent_build", { provider: provider ?? "anthropic" });
+        if (denied) return denied;
         auditLog("agent_build", this.props.userId, { provider: provider ?? "anthropic" });
+        await audit(this.safety(), { tool: "agent_build", action: "success", input: { provider: provider ?? "anthropic" } });
         const prov = provider ?? "anthropic";
         const defaultModel: Record<string, string> = {
           anthropic: "claude-sonnet-4-6",
@@ -568,15 +593,17 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
         dry_run: z.boolean().optional().describe("If true, validate ownership and list files that would be written without pushing"),
       },
       async ({ app_id, files, message, dry_run }) => {
-        if (this.props.readOnly) return txt("Read-only mode is active. Write tools are disabled.");
         const token = this.props.token;
         if (!token) return txt("Not authenticated. Connect with a FAS session token.");
+        const denied = await requirePermission(this.safety(), "write", "update_files", { app_id, fileCount: files?.length ?? 0 });
+        if (denied) return denied;
         if (!this.env.GITHUB_TOKEN) return txt("Write tools are disabled (server missing GITHUB_TOKEN).");
         if (!files?.length) return txt("No files provided.");
         if (!(await ownsApp(this.env.API_BASE, token, app_id)))
           return txt(`You don't own "${app_id}" (or it isn't published). Only the owner can update it.`);
         auditLog("update_files", this.props.userId, { app_id, fileCount: files.length, dry_run: !!dry_run });
         if (dry_run) {
+          await audit(this.safety(), { tool: "update_files", action: "dry_run", input: { app_id, fileCount: files.length } });
           const listing = files.map((f) => `- ${f.path} (${f.content.length} chars)`).join("\n");
           return txt(
             `[DRY RUN] Would push ${files.length} file(s) to **${app_id}**:\n${listing}\n\n` +
@@ -589,6 +616,7 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
         );
         try {
           const sha = await pushFiles(this.env.GITHUB_ORG, app_id, this.env.GITHUB_TOKEN, map, message || `Update ${app_id} via MCP`);
+          await audit(this.safety(), { tool: "update_files", action: "success", input: { app_id, fileCount: files.length }, result: { sha: sha.slice(0, 7) } });
           return txt(`Pushed ${files.length} file(s) to **${app_id}** (${sha.slice(0, 7)}). Auto-deploying to https://${app_id}.freeappstore.online (~30-60s). Use deploy_status to watch.`);
         } catch (e) {
           return txt(`Push failed: ${String(e)}`);
@@ -599,97 +627,19 @@ Prefer these before using the proxy. No key = no cost = no setup.`,
 }
 
 // ── Auth middleware ─────────────────────────────────────────────
-// Pass the Bearer session token into the DO as a prop. We do NOT locally
-// HMAC-verify it: the FAS backend is the source of truth — every authenticated
-// tool calls it (provision, /v1/apps/mine, logs), and it rejects invalid or
-// expired tokens. The MCP doesn't hold the backend's session signing key (it's
-// never been exported), so local verification can't work anyway. We decode the
-// uid from the token payload best-effort, purely for context/logging.
-// decodeUid is in lib.ts
-
-async function authenticateRequest(request: Request, env: Env): Promise<McpProps> {
-  const url = new URL(request.url);
-  const readOnly = request.headers.get("X-FAS-Read-Only") === "true"
-    || url.searchParams.get("read_only") === "1";
-
-  const auth = request.headers.get("Authorization") ?? "";
-  if (!auth.startsWith("Bearer ")) return { readOnly };
-  let token = auth.slice(7).trim();
-  if (!token) return { readOnly };
-
-  // Resolve OAuth access token → underlying FAS session
-  if (env.OAUTH_KV) {
-    const fasSession = await resolveOAuthToken(token, env.OAUTH_KV);
-    if (fasSession) token = fasSession;
-  }
-
-  return { userId: decodeUid(token), token, readOnly };
-}
-
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    const url = new URL(request.url);
-
-    // OAuth 2.1 routes (discovery, registration, authorize, token)
-    if (env.OAUTH_KV && env.SESSION_SIGNING_KEY) {
-      const oauthRes = await handleOAuthRoute(request, {
-        issuer: `${url.protocol}//${url.host}`,
-        fasAuthStart: `${env.API_BASE}/v1/auth/github/start`,
-        kv: env.OAUTH_KV,
-        sessionSigningKey: env.SESSION_SIGNING_KEY,
-      });
-      if (oauthRes) return oauthRes;
-    }
-
-    if (url.pathname === "/" || url.pathname === "") {
-      return new Response(
-        "FreeAppStore MCP Server\n\nConnect: npx mcp-remote https://mcp.freeappstore.online/mcp\n\n" +
-          "Build it yourself (your model writes the code): create_app, update_files, read_file, list_files\n" +
-          "Let the platform agent build it (you just prompt): agent_build, agent_status\n" +
-          "Info: list_apps, deploy_status, app_info, app_logs, platform_guide, sdk_reference\n\n" +
-          "Two ways to build, both from your editor:\n" +
-          "  1. create_app → read_file/update_files to improve → deploy_status.\n" +
-          "  2. agent_build('make a X app and deploy it') → the VibeCode agent writes + ships it (uses your vaulted AI key) → agent_status.\n\n" +
-          "Auth: OAuth 2.1 (automatic via mcp-remote) or Bearer <FAS session token>.\n",
-        { headers: { "content-type": "text/plain" } }
-      );
-    }
-
-    // Authenticate and inject the session into the target MCP DO before
-    // dispatch. Streamable HTTP serve() in agents@0.0.74 drops ctx.props, so we
-    // write props straight into the DO (keyed the same way serve() keys it:
-    // `streamable-http:${mcp-session-id}`). The session id is present on every
-    // post-initialize request (i.e. all tool calls).
-    if (url.pathname.startsWith("/mcp")) {
-      const auth = await authenticateRequest(request, env);
-
-      // Unauthenticated → return a 401 + WWW-Authenticate challenge so mcp-remote
-      // and Claude Code start the OAuth login flow. Without this the client never
-      // learns it must authenticate and every tool just returns "Not authenticated".
-      if (request.method !== "OPTIONS" && env.OAUTH_KV && env.SESSION_SIGNING_KEY) {
-        const valid = auth.token
-          ? !!(await verifySession(auth.token, env.SESSION_SIGNING_KEY))
-          : false;
-        if (!valid) {
-          const issuer = `${url.protocol}//${url.host}`;
-          const hadBearer = (request.headers.get("Authorization") ?? "").startsWith("Bearer ");
-          return createAuthChallenge({ issuer }, hadBearer ? "invalid_token" : undefined);
-        }
-      }
-
-      const sessionId = request.headers.get("mcp-session-id");
-      if (auth.token && sessionId) {
-        try {
-          const id = env.MCP_OBJECT.idFromName(`streamable-http:${sessionId}`);
-          const stub = env.MCP_OBJECT.get(id) as unknown as { setAuth(p: McpProps): Promise<void> };
-          await stub.setAuth({ userId: auth.userId, token: auth.token, readOnly: auth.readOnly });
-        } catch {
-          /* best effort — tool will report "not authenticated" if this failed */
-        }
-      }
-      return FasMcpAgent.serve("/mcp").fetch(request, env, ctx);
-    }
-
-    return FasMcpAgent.serve("/mcp").fetch(request, env, ctx);
-  },
-};
+// OAuth 2.1 is handled by @cloudflare/workers-oauth-provider: it owns /token,
+// /register (DCR), the discovery docs, and the 401 WWW-Authenticate challenge,
+// and only forwards requests with a valid access token to the MCP apiHandler —
+// where the granted props (set in auth-handler's completeAuthorization) arrive
+// as `this.props`. The interactive login lives in AuthHandler (defaultHandler).
+export default new OAuthProvider({
+  apiRoute: "/mcp",
+  apiHandler: FasMcpAgent.serve("/mcp"),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  defaultHandler: AuthHandler as any,
+  authorizeEndpoint: "/authorize",
+  tokenEndpoint: "/token",
+  clientRegistrationEndpoint: "/register",
+  scopesSupported: [...MCP_SCOPES],
+  accessTokenTTL: 86_400,
+});
