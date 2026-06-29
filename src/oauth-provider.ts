@@ -17,6 +17,28 @@ export interface OAuthConfig {
   sessionSigningKey: string;
 }
 
+/**
+ * Build a 401 challenge pointing at the protected-resource metadata. This
+ * `WWW-Authenticate` header is what makes mcp-remote / Claude Code start the
+ * OAuth login flow — without it an unauthenticated client never discovers it
+ * needs to authenticate and tools just return "Not authenticated" strings.
+ */
+export function createAuthChallenge(
+  config: Pick<OAuthConfig, "issuer">,
+  error?: "invalid_token",
+): Response {
+  const metadata = new URL("/.well-known/oauth-protected-resource/mcp", config.issuer);
+  const params = [`resource_metadata="${metadata.toString()}"`];
+  if (error) params.push(`error="${error}"`);
+  return new Response("Authentication required", {
+    status: 401,
+    headers: {
+      "WWW-Authenticate": `Bearer ${params.join(", ")}`,
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+}
+
 /** Try to handle an OAuth-related request. Returns null if not an OAuth path. */
 export async function handleOAuthRoute(
   request: Request,

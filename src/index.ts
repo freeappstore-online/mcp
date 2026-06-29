@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { fetchTemplateFiles, listRepoFiles, pushFiles, readRepoFile, type RepoFile, textToB64 } from "./github.js";
 import { verifySession } from "./session.js";
-import { handleOAuthRoute, resolveOAuthToken } from "./oauth-provider.js";
+import { createAuthChallenge, handleOAuthRoute, resolveOAuthToken } from "./oauth-provider.js";
 import { sessionPrefix, auditLog, decodeUid } from "./lib.js";
 
 interface Env {
@@ -662,6 +662,21 @@ export default {
     // post-initialize request (i.e. all tool calls).
     if (url.pathname.startsWith("/mcp")) {
       const auth = await authenticateRequest(request, env);
+
+      // Unauthenticated → return a 401 + WWW-Authenticate challenge so mcp-remote
+      // and Claude Code start the OAuth login flow. Without this the client never
+      // learns it must authenticate and every tool just returns "Not authenticated".
+      if (request.method !== "OPTIONS" && env.OAUTH_KV && env.SESSION_SIGNING_KEY) {
+        const valid = auth.token
+          ? !!(await verifySession(auth.token, env.SESSION_SIGNING_KEY))
+          : false;
+        if (!valid) {
+          const issuer = `${url.protocol}//${url.host}`;
+          const hadBearer = (request.headers.get("Authorization") ?? "").startsWith("Bearer ");
+          return createAuthChallenge({ issuer }, hadBearer ? "invalid_token" : undefined);
+        }
+      }
+
       const sessionId = request.headers.get("mcp-session-id");
       if (auth.token && sessionId) {
         try {
